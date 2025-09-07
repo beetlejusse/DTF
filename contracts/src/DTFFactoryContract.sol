@@ -4,8 +4,9 @@ pragma solidity ^0.8.19;
 import "../lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import "./DTFContract.sol";
+import "./utils/DTFConstants.sol";
 
-contract DTFFactory is Ownable, ReentrancyGuard{
+contract DTFFactory is DTFConstants, Ownable, ReentrancyGuard{
 
     //EVENTS
     event DTFCreated(
@@ -17,13 +18,6 @@ contract DTFFactory is Ownable, ReentrancyGuard{
         uint256[] weights,
         uint256 createdAt
     );
-
-
-    //CONSTANTS
-    uint256 private constant MIN_TOKENS=2;
-    uint256 private constant MAX_TOKENS=10;
-    uint256 private constant BASIC_POINTS=10000;
-
 
     //STATE VARIABLES
     struct DTFData{
