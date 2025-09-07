@@ -22,7 +22,7 @@ contract DTFFactory is Ownable, ReentrancyGuard{
     //CONSTANTS
     uint256 private constant MIN_TOKENS=2;
     uint256 private constant MAX_TOKENS=10;
-    uint256 private constant BAISC_POINTS=10000;
+    uint256 private constant BASIC_POINTS=10000;
 
 
     //STATE VARIABLES
@@ -54,7 +54,7 @@ contract DTFFactory is Ownable, ReentrancyGuard{
         _validateParams(name, symbol, tokens, weights);   
 
         //deploy new contract 
-        DTFContact dtf = new DTFContact({
+        DTFContract dtf = new DTFContract({
             name: name,
             symbol: symbol,
             tokens: tokens,
@@ -104,7 +104,7 @@ contract DTFFactory is Ownable, ReentrancyGuard{
             totalWeight += weights[i];
         }
 
-        require(totalWeight==BAISC_POINTS, "Weights must add up to 10000");
+        require(totalWeight==BASIC_POINTS, "Weights must add up to 10000");
 
 
         //checking for duplicate tokens

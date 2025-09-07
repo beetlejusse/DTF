@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-contract DTFContact {
+contract DTFContract {
 
     struct DTFData {
         string name;
@@ -33,5 +33,5 @@ contract DTFContact {
         });
     }
 
-    
+
 }
