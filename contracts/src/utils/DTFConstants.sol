@@ -9,5 +9,13 @@ abstract contract DTFConstants{
     uint256 internal constant BASIC_POINTS=10000;
 
     //DTFCONTRACT CONSTANTS
+    uint256 internal constant MINT_FEES_BPS= 50; //0.5% fees
+    uint256 internal constant REDEEM_FEE_BPS = 50; // 0.5% fees
+
+    //HELPER CONFIG CONSTANTS
+
+    
+
+    
 
 }
