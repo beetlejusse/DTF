@@ -165,7 +165,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         //define actions for the swap using the singlton architecture of v4
         bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));  //what the universal router will execute
-
+        //check the commands library to ensure V4_SWAP command is available
         bytes memory actions= abi.encodePacked(
             uint8(Actions.SWAP_EXACT_IN_SINGLE),    //this ensures exact amount of eth is swapped
             uint8(Actions.SETTLE_ALL),              //flash accounting settles the swap interanlly
@@ -215,8 +215,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             currency0: Currency.wrap(token),        //the token getting swapped
             currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
             fee: 3000,          
-            tickSpacing: 60,                    // Tick spacing for the fee tier      
-            hooks:  bytes("")                     //no hooks for this basic swap             //the fee tier of the pool
+            tickSpacing: 60,                        // Tick spacing for the fee tier      
+            hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
         });
 
         //define actions for the swap using the singlton architecture of v4
