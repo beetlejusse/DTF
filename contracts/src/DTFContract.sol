@@ -5,7 +5,9 @@ import "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import "../lib/universal-router/contracts/UniversalRouter.sol";
 import "../lib/universal-router/contracts/libraries/Commands.sol";
 import "../lib/v4-periphery/src/interfaces/IV4Router.sol";
+import "../lib/v4-periphery/src/libraries/Actions.sol";
 import "../lib/v4-core/src/interfaces/IPoolManager.sol";
+import "../lib/v4-core/src/types/PoolKey.sol";
 import "../lib/v4-core/src/libraries/StateLibrary.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -20,6 +22,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     event DTFTokensMinted(uint256 investedETH, uint256 dtfTokensMinted, address indexed to);
     event TokenSwapped(address indexed token, uint256 ethSpent, uint256 tokensReceived);
     event TokensRedeemed(address indexed user, uint256 dtfTokensBurned, uint256 ethRedeemed);  
+    event FeeWithdrawn(address indexed owner, uint256 feeAmount);
 
     //STRUCTS
     struct UniswapV4Addresses {
@@ -50,7 +53,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         UniswapV4Addresses memory _deployment
     ) ERC20(_name, _symbol) Ownable(_creator){
         
-        require(_tokens.length == _weights.length, "lenght mismatch");
+        require(_tokens.length == _weights.length, "length mismatch");
         require(_tokens.length >1, "required atleast 2 tokens");
 
         tokens=_tokens;
@@ -65,7 +68,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         _mintWithEth(msg.value, msg.sender);
     }
 
-    function minWithEth() external payable nonReentrant{
+    function mintWithEth() external payable nonReentrant{
         require(msg.value > 0, "No ETH sent");
         _mintWithEth(msg.value, msg.sender);
     }
@@ -93,7 +96,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
     //INTERNAL FUNCTIONS
     function _mintWithEth(uint256 amount, address to) internal{
-        uint256 fees = (amount* MINT_FEES_BPS)/BASIC_POINTS;
+        uint256 fee = (amount* MINT_FEES_BPS)/BASIC_POINTS;
         uint256 investedAmount= amount - fee;
 
         //buy underlying assets using the universal router
@@ -118,10 +121,10 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             uint256 ethForToken= (amount * weight)/BASIC_POINTS;
 
             //now calling the swap function only for erc20 tokens
-            if (token= address(0)){
-                tokenBalance(address(0)) += ethForToken; //not doing anything with eth.. is stored in the contract for transactions and gas
+            if(token == address(0)){
+                tokenBalance[address(0)] += ethForToken; //not doing anything with eth.. is stored in the contract for transactions and gas
             } else {
-                uint256 tokenAmount= _swapETHForTokenv4(token, ethForToken);
+                uint256 tokenAmount= _swapETHForTokenV4(token, ethForToken);
                 tokenBalance[token] += tokenAmount;
 
                 emit TokenSwapped(token, amount, tokenAmount);
@@ -147,21 +150,17 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         }
     }
 
-    function _swapETHForTokenv4(address token, uint256 ethAmount) internal returns(uint256 tokensReceived){
+    function _swapETHForTokenV4(address token, uint256 ethAmount) internal returns(uint256 tokensReceived){
 
-        require(ethAmount > 0, "invalid amount");
-
-
-        //approve universal router to spend tokens
-        IERC20(token).approve(address(universalRouter), type(uint256).max);
+        require(ethAmount > 0, "invalid amount");      
 
         //Define PoolKey for the ETH/token pair
-        PoolKey memory poolKey=({
-            currency0: Currency(address(0)),    //the ETH currency getting accepted
-            currency1: Currency(token),         //the token currency getting swapped to
+         PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(address(0)),    //the ETH currency getting accepted
+            currency1: Currency.wrap(token),         //the token currency getting swapped to
             fee: 3000,    
-            tickSpacing: 60,                    // Tick spacing for the fee tier      
-            hooks: address(0)                   //no hooks for this basic swap             //the fee tier of the pool
+            tickSpacing: 60,                        // Tick spacing for the fee tier      
+            hooks: IHooks(address(0))               //no hooks for this basic swap             
         });
 
         //define actions for the swap using the singlton architecture of v4
@@ -180,9 +179,9 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             poolKey: poolKey,
             zeroForOne: true,                       //boolean determines the direction of the swap,swapping from currency0 to currency1
             amountIn: uint128(ethAmount),              //amount of eth to swap
-            amountOutMinimum: 0,                    //no slippage protection for now
+            amountOutMinimum: uint128(0),                    //no slippage protection for now
             hookData: bytes("")                     //no hook data
-        })
+        });
 
         params[0]= abi.encode(swapParams);                  //params for swap function
         params[1] = abi.encode(poolKey.currency0, ethAmount);  //encoding of the currency to be debited and the amount to be paid
@@ -193,36 +192,109 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         inputs[0]= abi.encode(actions, params);
 
         //Execute the swap through the Universal Router
-        uin256 tokensBeforeSwap= IERC20(token).balanceOf(address(this));
+        uint256 tokenBalanceBefore = IERC20(token).balanceOf(address(this));
 
         uint256 deadline = block.timestamp + DEFAULT_SWAP_DEADLINE; //how long the swap is valid for
         universalRouter.execute{value: ethAmount}(commands, inputs, deadline); //execute the swap
 
         uint256 tokenBalanceAfter = IERC20(token).balanceOf(address(this));
 
-        tokensReceived = tokenBalanceAfter - tokensBeforeSwap;
+        tokensReceived = tokenBalanceAfter - tokenBalanceBefore;
 
         require(tokensReceived > 0, "No tokens received from swap");        
     }
 
-    function _swapTokenForETHV4(address token, uint256 tokenAmount){
+    function _swapTokenForETHV4(address token, uint256 tokenAmount) internal returns(uint256 ethReceived){
         require(tokenAmount > 0, "invalid amount");
 
+        //approve universal router to spend tokens
+        IERC20(token).approve(address(universalRouter), type(uint256).max);
 
+        //Define PoolKey for the ETH/token pair
+        PoolKey memory poolKey=PoolKey({
+            currency0: Currency.wrap(token),        //the token getting swapped
+            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
+            fee: 3000,          
+            tickSpacing: 60,                    // Tick spacing for the fee tier      
+            hooks:  bytes("")                     //no hooks for this basic swap             //the fee tier of the pool
+        });
 
-        
+        //define actions for the swap using the singlton architecture of v4
+        bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));  //what the universal router will execute
+
+        bytes memory actions= abi.encodePacked(
+            uint8(Actions.SWAP_EXACT_IN_SINGLE),    //this ensures exact amount of token is swapped
+            uint8(Actions.SETTLE_ALL),              //flash accounting settles the swap interanlly
+            uint8(Actions.TAKE_ALL)                 //sends recieved eth to this contract
+        );
+
+        //define the parameters for the swap
+        bytes[] memory params= new bytes[](3);
+
+        IV4Router.ExactInputSingleParams memory swapParams= IV4Router.ExactInputSingleParams({
+            poolKey: poolKey,
+            zeroForOne: true,                       //boolean determines the direction of the swap,swapping from token to eth
+            amountIn: uint128(tokenAmount),              //amount of eth to swap
+            amountOutMinimum: uint128(0),                    //no slippage protection for now
+            hookData: bytes("")                     //no hook data
+        });
+
+        params[0]= abi.encode(swapParams);                  //params for swap function
+        params[1] = abi.encode(poolKey.currency0, tokenAmount);  //encoding of the currency to be debited and the amount to be paid
+        params[2] = abi.encode(poolKey.currency1);          //encoding of the currency to be received 
+
+        //combines these params and actions into a single input for the universal router
+        bytes[] memory inputs= new bytes[](1);
+        inputs[0]= abi.encode(actions, params);
+
+        //Execute the swap through the Universal Router
+        uint256 ethBeforeSwap= IERC20(token).balanceOf(address(this));
+
+        uint256 deadline = block.timestamp + DEFAULT_SWAP_DEADLINE; //how long the swap is valid for
+        universalRouter.execute(commands, inputs, deadline); //execute the swap
+
+        uint256 ethBalanceAfter = address(this).balance;
+
+        ethReceived = ethBalanceAfter - ethBeforeSwap;
+
+        require(ethReceived > 0, "No tokens received from swap");          
     }
-
-    
-
+ 
     function _calculateDTFTokensToMint(uint256 amount) internal view returns(uint256){
         
-        ig(totalSupply() == 0){
+        if(totalSupply() == 0){
 
             return amount;
         } else {
 
             return (amount * totalSupply()) / totalValueLocked;
         }
+    }
+
+    //VIEWER FUNCTIONS
+    function getTokens() external view returns(address[] memory){
+        return tokens;
+    }
+
+    function getWeights() external view returns(uint256[] memory){
+        return weights;
+    }
+
+    function getTokenBalance(address token) external view returns(uint256){
+        return tokenBalance[token];
+    }
+
+
+    //OWNER FUNCTIONS
+    function withdrawFees() external onlyOwner {
+        require(totalFeesCollected  > 0, "No fees to withdraw");
+        
+        uint256 feesToWithdraw = totalFeesCollected ;
+        totalFeesCollected  = 0;
+        
+        (bool success,) = payable(owner()).call{value: feesToWithdraw}("");
+        require(success, "Fee transfer failed");
+        
+        emit FeeWithdrawn(owner(), feesToWithdraw);
     }
 }
