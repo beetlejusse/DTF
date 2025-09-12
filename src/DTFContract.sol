@@ -2,19 +2,22 @@
 pragma solidity ^0.8.19;
 
 import "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import "../lib/universal-router/contracts/UniversalRouter.sol";
-import "../lib/universal-router/contracts/libraries/Commands.sol";
-import "../lib/v4-periphery/src/interfaces/IV4Router.sol";
-import "../lib/v4-periphery/src/libraries/Actions.sol";
-import "../lib/v4-core/src/interfaces/IPoolManager.sol";
-import "../lib/v4-core/src/types/PoolKey.sol";
-import "../lib/v4-core/src/libraries/StateLibrary.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "../lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 
-import "./utils/DTFConstants.sol";
+import "../lib/universal-router/contracts/UniversalRouter.sol";
+import "../lib/universal-router/contracts/libraries/Commands.sol";
 
+import "../lib/v4-periphery/src/interfaces/IV4Router.sol";
+import "../lib/v4-periphery/src/libraries/Actions.sol";
+
+import "../lib/v4-core/src/interfaces/IPoolManager.sol";
+import "../lib/v4-core/src/types/PoolKey.sol";
+import "../lib/v4-core/src/libraries/StateLibrary.sol";
+
+import "./utils/DTFConstants.sol";
+import "./utils/UniswapV4Types.sol";
 
 contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
@@ -23,12 +26,6 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     event TokenSwapped(address indexed token, uint256 ethSpent, uint256 tokensReceived);
     event TokensRedeemed(address indexed user, uint256 dtfTokensBurned, uint256 ethRedeemed);  
     event FeeWithdrawn(address indexed owner, uint256 feeAmount);
-
-    //STRUCTS
-    struct UniswapV4Addresses {
-        address poolManager;
-        address universalRouter;
-    }
 
     //CONSTANTS
     UniversalRouter public immutable universalRouter;
@@ -61,6 +58,14 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         createdAt=_createdAt;
         universalRouter = UniversalRouter(payable(_deployment.universalRouter));
         poolManager = IPoolManager(_deployment.poolManager);  
+
+        //approve universal router to spend tokens
+        for(uint256 i; i< tokens.length; i++){
+            address token= tokens[i];
+            if(token != address(0)){
+                IERC20(token).approve(address(universalRouter), type(uint256).max);
+            }
+        }
     }
 
     receive() external payable{
@@ -127,17 +132,17 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
                 uint256 tokenAmount= _swapETHForTokenV4(token, ethForToken);
                 tokenBalance[token] += tokenAmount;
 
-                emit TokenSwapped(token, amount, tokenAmount);
+                emit TokenSwapped(token, ethForToken, tokenAmount);
             }
         }
     }
 
-    function _sellUnderlyingTokensForETH(uint256 dtfAmount) internal returns(uint256 ethRedeemed){
-        require(dtfAmount > 0, "invalid amount");
+    function _sellUnderlyingTokensForETH(uint256 userShareBPS) internal returns(uint256 ethRedeemed){
+        require(userShareBPS > 0, "invalid amount");
 
         for(uint256 i; i< tokens.length; i++){
 
-            uint256 tokenAmountToSell= (tokenBalance[tokens[i]] * dtfAmount)/ totalSupply();    //calculates amount of token to sell based on the user's share of total supply
+            uint256 tokenAmountToSell= (tokenBalance[tokens[i]] * userShareBPS)/ BASIC_POINTS;    //calculates amount of token to sell based on the user's share of total supply
             
             if( tokens[i]== address(0)){
                 ethRedeemed += tokenAmountToSell;
@@ -155,9 +160,12 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         require(ethAmount > 0, "invalid amount");      
 
         //Define PoolKey for the ETH/token pair
-         PoolKey memory poolKey = PoolKey({
-            currency0: Currency.wrap(address(0)),    //the ETH currency getting accepted
-            currency1: Currency.wrap(token),         //the token currency getting swapped to
+        (address currency0, address currency1) = address(0) < token ? (address(0), token) : (token, address(0));
+        bool zeroForOne = (address(0) == currency0);
+
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(currency0),    //the ETH currency getting accepted
+            currency1: Currency.wrap(currency1),         //the token currency getting swapped to
             fee: 3000,    
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks: IHooks(address(0))               //no hooks for this basic swap             
@@ -177,15 +185,15 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         IV4Router.ExactInputSingleParams memory swapParams= IV4Router.ExactInputSingleParams({
             poolKey: poolKey,
-            zeroForOne: true,                       //boolean determines the direction of the swap,swapping from currency0 to currency1
-            amountIn: uint128(ethAmount),              //amount of eth to swap
-            amountOutMinimum: uint128(0),                    //no slippage protection for now
+            zeroForOne: zeroForOne,                 //boolean determines the direction of the swap,swapping from currency0 to currency1
+            amountIn: uint128(ethAmount),           //amount of eth to swap
+            amountOutMinimum: uint128(0),             //no slippage protection for now
             hookData: bytes("")                     //no hook data
         });
 
-        params[0]= abi.encode(swapParams);                  //params for swap function
-        params[1] = abi.encode(poolKey.currency0, ethAmount);  //encoding of the currency to be debited and the amount to be paid
-        params[2] = abi.encode(poolKey.currency1);          //encoding of the currency to be received 
+        params[0]= abi.encode(swapParams);                  //params for SWAP_EXACT_IN_SINGLE
+        params[1] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(ethAmount));              //params for SETTLE_ALL
+        params[2] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(0));              //params for TAKE_ALL
 
         //combines these params and actions into a single input for the universal router
         bytes[] memory inputs= new bytes[](1);
@@ -207,13 +215,13 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     function _swapTokenForETHV4(address token, uint256 tokenAmount) internal returns(uint256 ethReceived){
         require(tokenAmount > 0, "invalid amount");
 
-        //approve universal router to spend tokens
-        IERC20(token).approve(address(universalRouter), type(uint256).max);
-
         //Define PoolKey for the ETH/token pair
+        (address currency0, address currency1) = token < address(0) ? (token, address(0)) : (address(0), token);
+        bool zeroForOne = (token == currency0);
+
         PoolKey memory poolKey=PoolKey({
-            currency0: Currency.wrap(token),        //the token getting swapped
-            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
+            currency0: Currency.wrap(currency0),        //the token getting swapped
+            currency1: Currency.wrap(currency1),   //asset being swapped to, eth in this case
             fee: 3000,          
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
@@ -233,22 +241,22 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         IV4Router.ExactInputSingleParams memory swapParams= IV4Router.ExactInputSingleParams({
             poolKey: poolKey,
-            zeroForOne: true,                       //boolean determines the direction of the swap,swapping from token to eth
-            amountIn: uint128(tokenAmount),              //amount of eth to swap
-            amountOutMinimum: uint128(0),                    //no slippage protection for now
+            zeroForOne: zeroForOne,                 //boolean determines the direction of the swap,swapping from token to eth
+            amountIn: uint128(tokenAmount),           //amount of eth to swap
+            amountOutMinimum: uint128(0),             //no slippage protection for now
             hookData: bytes("")                     //no hook data
         });
 
-        params[0]= abi.encode(swapParams);                  //params for swap function
-        params[1] = abi.encode(poolKey.currency0, tokenAmount);  //encoding of the currency to be debited and the amount to be paid
-        params[2] = abi.encode(poolKey.currency1);          //encoding of the currency to be received 
+        params[0]= abi.encode(swapParams);                  //params for SWAP_EXACT_IN_SINGLE
+        params[1] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(tokenAmount));              //params for SETTLE_ALL
+        params[2] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(0));              //params for TAKE_ALL
 
         //combines these params and actions into a single input for the universal router
         bytes[] memory inputs= new bytes[](1);
         inputs[0]= abi.encode(actions, params);
 
         //Execute the swap through the Universal Router
-        uint256 ethBeforeSwap= IERC20(token).balanceOf(address(this));
+        uint256 ethBeforeSwap= address(this).balance;
 
         uint256 deadline = block.timestamp + DEFAULT_SWAP_DEADLINE; //how long the swap is valid for
         universalRouter.execute(commands, inputs, deadline); //execute the swap

@@ -5,6 +5,7 @@ import "../lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import "./DTFContract.sol";
 import "./utils/DTFConstants.sol";
+import "./utils/UniswapV4Types.sol";
 
 contract DTFFactory is DTFConstants, Ownable, ReentrancyGuard{
 
@@ -34,8 +35,12 @@ contract DTFFactory is DTFConstants, Ownable, ReentrancyGuard{
     mapping(address=>bool) public isActiveDTF;
     mapping(address => DTFData) public dtfInfo;
     address[] public dtfs;
+    UniswapV4Addresses public uniswapConfig;
 
-    constructor() Ownable(msg.sender) {}
+    constructor(UniswapV4Addresses memory _uniswapConfig) Ownable(msg.sender) {
+        require(_uniswapConfig.poolManager != address(0) && _uniswapConfig.universalRouter != address(0), "Invalid Uniswap V4 addresses");
+        uniswapConfig = _uniswapConfig;
+    }
 
     function createDTF(
         string memory name,
@@ -49,12 +54,13 @@ contract DTFFactory is DTFConstants, Ownable, ReentrancyGuard{
 
         //deploy new contract 
         DTFContract dtf = new DTFContract({
-            name: name,
-            symbol: symbol,
-            tokens: tokens,
-            weights: weights,
-            createdAt: block.timestamp,
-            creator: msg.sender
+            _name: name,
+            _symbol: symbol,
+            _tokens: tokens,
+            _weights: weights,
+            _createdAt: block.timestamp,
+            _creator: msg.sender,
+            _deployment: uniswapConfig
             }
         );   
 
