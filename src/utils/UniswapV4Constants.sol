@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./UniswapV4Types.sol";
+
+abstract contract UniswapV4Constants {
+
+    //ARBITRUM
+    uint256 internal constant ARBITRUM_SEPOLIA_CHAIN_ID = 421614;
+    
+    UniswapV4Addresses internal ARBITRUM_SEPOLIA_V4_ADDRESSES = UniswapV4Addresses({
+        poolManager: 0xFB3e0C6F74eB1a21CC1Da29aeC80D2Dfe6C9a317,
+        universalRouter: 0xeFd1D4bD4cf1e86Da286BB4CB1B8BcED9C10BA47
+    });
+
+
+
+    //BASE
+    uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
+
+    UniswapV4Addresses internal BASE_SEPOLIA_V4_ADDRESSES = UniswapV4Addresses({
+        poolManager: 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408,
+        universalRouter: 0x492E6456D9528771018DeB9E87ef7750EF184104
+    });
+
+    //UNICHAIN
+    uint256 internal constant UNICHAIN_SEPOLIA_CHAIN_ID = 1301;
+
+    UniswapV4Addresses internal UNICHAIN_SEPOLIA_V4_ADDRESSES = UniswapV4Addresses({
+        poolManager: 0x00B036B58a818B1BC34d502D3fE730Db729e62AC,
+        universalRouter: 0xf70536B3bcC1bD1a972dc186A2cf84cC6da6Be5D
+    });
+
+}
