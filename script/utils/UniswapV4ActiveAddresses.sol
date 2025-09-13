@@ -11,6 +11,7 @@ contract UniswapV4ActiveAddresses is Script, UniswapV4Constants {
     mapping(uint256 => UniswapV4Addresses) public chainIdToV4Addresses;
 
     constructor(){
+        chainIdToV4Addresses[SEPOLIA_CHAIN_ID ]= SEPOLIA_V4_ADDRESSES;
         chainIdToV4Addresses[ARBITRUM_SEPOLIA_CHAIN_ID ]= ARBITRUM_SEPOLIA_V4_ADDRESSES;
         chainIdToV4Addresses[BASE_SEPOLIA_CHAIN_ID]= BASE_SEPOLIA_V4_ADDRESSES;
         chainIdToV4Addresses[UNICHAIN_SEPOLIA_CHAIN_ID]= UNICHAIN_SEPOLIA_V4_ADDRESSES;

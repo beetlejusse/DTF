@@ -99,7 +99,6 @@ contract DTFFactory is DTFConstants, Ownable, ReentrancyGuard{
         //checking if weights add up to 10000
         uint256 totalWeight= 0;
         for(uint256 i=0; i < weights.length; i++){
-            require(tokens[i] != address(0), "Invalid token address");
             require(weights[i] > 0, "Weight must be greater than 0");
             totalWeight += weights[i];
         }

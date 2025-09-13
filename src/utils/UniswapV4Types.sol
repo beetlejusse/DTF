@@ -5,4 +5,5 @@ pragma solidity ^0.8.19;
 struct UniswapV4Addresses {
     address poolManager;
     address universalRouter;
+    address quoter;
 }

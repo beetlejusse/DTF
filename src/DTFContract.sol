@@ -11,10 +11,13 @@ import "../lib/universal-router/contracts/libraries/Commands.sol";
 
 import "../lib/v4-periphery/src/interfaces/IV4Router.sol";
 import "../lib/v4-periphery/src/libraries/Actions.sol";
+import "../lib/v4-periphery/src/interfaces/IV4Quoter.sol";
 
 import "../lib/v4-core/src/interfaces/IPoolManager.sol";
 import "../lib/v4-core/src/types/PoolKey.sol";
 import "../lib/v4-core/src/libraries/StateLibrary.sol";
+
+import {console} from "../lib/forge-std/src/console.sol";
 
 import "./utils/DTFConstants.sol";
 import "./utils/UniswapV4Types.sol";
@@ -30,6 +33,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     //CONSTANTS
     UniversalRouter public immutable universalRouter;
     IPoolManager public immutable poolManager;
+    IV4Quoter public immutable quoter;
 
     address[] public tokens;
     uint256[] public weights;
@@ -57,7 +61,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         weights=_weights;
         createdAt=_createdAt;
         universalRouter = UniversalRouter(payable(_deployment.universalRouter));
-        poolManager = IPoolManager(_deployment.poolManager);  
+        poolManager = IPoolManager(_deployment.poolManager); 
+        quoter = IV4Quoter(_deployment.quoter); 
 
         //approve universal router to spend tokens
         for(uint256 i; i< tokens.length; i++){
@@ -70,12 +75,13 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
     receive() external payable{
         require(msg.value >0, "No ETH sent");
-        _mintWithEth(msg.value, msg.sender);
+        _mintWithEth(msg.value, msg.sender, SLIPPAGE_BPS); //default slippageBps of 2%
     }
 
-    function mintWithEth() external payable nonReentrant{
+    function mintWithEth(uint256  slippageBps) external payable nonReentrant{
         require(msg.value > 0, "No ETH sent");
-        _mintWithEth(msg.value, msg.sender);
+        require(slippageBps <= 500, "Slippage exceeds 5% limit"); // 500 BPS = 5%
+        _mintWithEth(msg.value, msg.sender, slippageBps);
     }
 
     function redeemforEth(uint256 dtfAmount) external nonReentrant{
@@ -100,12 +106,12 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     }
 
     //INTERNAL FUNCTIONS
-    function _mintWithEth(uint256 amount, address to) internal{
+    function _mintWithEth(uint256 amount, address to, uint256 slippageBps ) internal{
         uint256 fee = (amount* MINT_FEES_BPS)/BASIC_POINTS;
         uint256 investedAmount= amount - fee;
 
         //buy underlying assets using the universal router
-        _buyUnderlyingTokensWithETH(investedAmount);
+        _buyUnderlyingTokensWithETH(investedAmount, slippageBps);
 
         //Calculate and mint DTF tokens to user
         uint256 dtfTokensToMint= _calculateDTFTokensToMint(investedAmount);
@@ -118,7 +124,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         emit DTFTokensMinted(totalValueLocked, dtfTokensToMint, to);
     }
 
-    function _buyUnderlyingTokensWithETH(uint256 amount) internal{
+    function _buyUnderlyingTokensWithETH(uint256 amount,  uint256 slippageBps) internal{
 
         for(uint256 i; i< tokens.length; i++){
             address token= tokens[i];
@@ -129,7 +135,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             if(token == address(0)){
                 tokenBalance[address(0)] += ethForToken; //not doing anything with eth.. is stored in the contract for transactions and gas
             } else {
-                uint256 tokenAmount= _swapETHForTokenV4(token, ethForToken);
+                uint256 tokenAmount= _swapETHForTokenV4(token, ethForToken, slippageBps);
                 tokenBalance[token] += tokenAmount;
 
                 emit TokenSwapped(token, ethForToken, tokenAmount);
@@ -147,7 +153,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             if( tokens[i]== address(0)){
                 ethRedeemed += tokenAmountToSell;
             } else {
-                uint256 ethRecievedFromSwap= _swapTokenForETHV4(tokens[i], tokenAmountToSell);
+                uint256 ethRecievedFromSwap= _swapTokenForETHV4(tokens[i], tokenAmountToSell, SLIPPAGE_BPS); 
                 ethRedeemed += ethRecievedFromSwap;
             }
 
@@ -155,7 +161,24 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         }
     }
 
-    function _swapETHForTokenV4(address token, uint256 ethAmount) internal returns(uint256 tokensReceived){
+    function _getExpectedAmountOut(PoolKey memory poolKey, bool zeroForOne, uint256 amountIn) internal returns (uint256 amountOut) {
+        try quoter.quoteExactInputSingle(
+            IV4Quoter.QuoteExactSingleParams({
+                poolKey: poolKey,
+                zeroForOne: zeroForOne,
+                exactAmount: uint128(amountIn),
+                hookData: bytes("")
+            })
+        ) returns (uint256 _amountOut, uint256 gasEstimate) {
+            return _amountOut;
+        } catch {
+            // Return 0 if the quote fails
+            console.log("Quoter didnt work, falling back to no slippage protection");  
+            return 0;
+        }
+    }
+
+    function _swapETHForTokenV4(address token, uint256 ethAmount, uint256 slippageBps) internal returns(uint256 tokensReceived){
 
         require(ethAmount > 0, "invalid amount");      
 
@@ -170,6 +193,10 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks: IHooks(address(0))               //no hooks for this basic swap             
         });
+
+        //get expected amount out for slippage protection
+        uint256 expectedAmountOut = _getExpectedAmountOut(poolKey, zeroForOne, ethAmount);
+        uint256 amountOutMinimum = (expectedAmountOut * (10000 - slippageBps)) / 10000;
 
         //define actions for the swap using the singlton architecture of v4
         bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));  //what the universal router will execute
@@ -187,7 +214,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             poolKey: poolKey,
             zeroForOne: zeroForOne,                 //boolean determines the direction of the swap,swapping from currency0 to currency1
             amountIn: uint128(ethAmount),           //amount of eth to swap
-            amountOutMinimum: uint128(0),             //no slippage protection for now
+            amountOutMinimum: uint128(amountOutMinimum),             //no slippage protection for now
             hookData: bytes("")                     //no hook data
         });
 
@@ -212,11 +239,11 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         require(tokensReceived > 0, "No tokens received from swap");        
     }
 
-    function _swapTokenForETHV4(address token, uint256 tokenAmount) internal returns(uint256 ethReceived){
+    function _swapTokenForETHV4(address token, uint256 tokenAmount, uint256 slippageBps) internal returns(uint256 ethReceived){
         require(tokenAmount > 0, "invalid amount");
 
         //Define PoolKey for the ETH/token pair
-        (address currency0, address currency1) = token < address(0) ? (token, address(0)) : (address(0), token);
+        (address currency0, address currency1) = token < address(0) ? (address(0), token) : (token, address(0));
         bool zeroForOne = (token == currency0);
 
         PoolKey memory poolKey=PoolKey({
@@ -226,6 +253,10 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
         });
+
+        //get expected amount out for slippage protection
+        uint256 expectedEthOut = _getExpectedAmountOut(poolKey, zeroForOne, tokenAmount);
+        uint256 amountOutMinimum = (expectedEthOut * (10000 - slippageBps)) / 10000;
 
         //define actions for the swap using the singlton architecture of v4
         bytes memory commands = abi.encodePacked(uint8(Commands.V4_SWAP));  //what the universal router will execute
@@ -243,7 +274,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             poolKey: poolKey,
             zeroForOne: zeroForOne,                 //boolean determines the direction of the swap,swapping from token to eth
             amountIn: uint128(tokenAmount),           //amount of eth to swap
-            amountOutMinimum: uint128(0),             //no slippage protection for now
+            amountOutMinimum: uint128(amountOutMinimum),             //no slippage protection for now
             hookData: bytes("")                     //no hook data
         });
 
