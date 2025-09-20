@@ -83,12 +83,12 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         _mintWithEth(msg.value, msg.sender, slippageBps);
     }
 
-    function redeemforEth(uint256 dtfAmount) external nonReentrant{
+    function redeemforEth(uint256 dtfAmount, uint256 slippageBps) external nonReentrant{
         require(balanceOf(msg.sender) >= dtfAmount, "insufficient DTF balance");
         require(dtfAmount > 0, "invalid amount");
 
         uint256 userShareBPS= (dtfAmount * BASIC_POINTS) / totalSupply(); //gives what percentage of the total supply the user is redeeming 
-        uint256 ethRedeemed= _sellUnderlyingTokensForETH(userShareBPS);
+        uint256 ethRedeemed= _sellUnderlyingTokensForETH(userShareBPS, slippageBps); 
         uint256 fee= (ethRedeemed * REDEEM_FEE_BPS)/BASIC_POINTS;
         uint256 redeemAmount= ethRedeemed - fee;
 
@@ -155,7 +155,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         }
     }
 
-    function _sellUnderlyingTokensForETH(uint256 userShareBPS) internal returns(uint256 ethRedeemed){
+    function _sellUnderlyingTokensForETH(uint256 userShareBPS, uint256 slippageBps) internal returns(uint256 ethRedeemed){
         require(userShareBPS > 0, "invalid amount");
 
         for(uint256 i; i< tokens.length; i++){
@@ -165,7 +165,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             if( tokens[i]== address(0)){
                 ethRedeemed += tokenAmountToSell;
             } else {
-                uint256 ethRecievedFromSwap= _swapTokenForETHV4(tokens[i], tokenAmountToSell, SLIPPAGE_BPS); 
+                uint256 ethRecievedFromSwap= _swapTokenForETHV4(tokens[i], tokenAmountToSell, slippageBps); 
                 ethRedeemed += ethRecievedFromSwap;
             }
 
@@ -194,14 +194,14 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         if(tokenAmount == 0) return 0;
         
         PoolKey memory poolKey=PoolKey({
-            currency0: Currency.wrap(token),        //the token getting swapped
-            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
+            currency0: Currency.wrap(address(0)),        //the token getting swapped
+            currency1: Currency.wrap(token),   //asset being swapped to, eth in this case
             fee: 3000,          
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
         });
         
-        return _getExpectedAmountOut(poolKey, true, tokenAmount);
+        return _getExpectedAmountOut(poolKey, ZERO_TO_ONE_REDEEM, tokenAmount);
     }
 
     function _swapETHForTokenV4(address token, uint256 ethAmount, uint256 slippageBps) internal returns(uint256 tokensReceived){
@@ -210,7 +210,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         //Define PoolKey for the ETH/token pair
         // (address currency0, address currency1) = address(0) < token ? (address(0), token) : (token, address(0));
-        bool zeroForOne = true;
+        bool zeroForOne = ZERO_TO_ONE_MINT;
 
         PoolKey memory poolKey = PoolKey({
             currency0: Currency.wrap(address(0)),    //the ETH currency getting accepted
@@ -270,15 +270,16 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         //Define PoolKey for the ETH/token pair
 
+        bool zeroForOne = ZERO_TO_ONE_REDEEM;
+
         PoolKey memory poolKey=PoolKey({
-            currency0: Currency.wrap(token),        //the token getting swapped
-            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
+            currency0: Currency.wrap(address(0)),        //the token getting swapped
+            currency1: Currency.wrap(token),   //asset being swapped to, eth in this case
             fee: 3000,          
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
         });
 
-        bool zeroForOne = true;
 
         //get expected amount out for slippage protection
         uint256 expectedEthOut = _getExpectedAmountOut(poolKey, zeroForOne, tokenAmount);
@@ -305,8 +306,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         });
 
         params[0]= abi.encode(swapParams);                  //params for SWAP_EXACT_IN_SINGLE
-        params[1] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(tokenAmount));              //params for SETTLE_ALL
-        params[2] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(0));              //params for TAKE_ALL
+        params[1] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(tokenAmount));              //params for SETTLE_ALL
+        params[2] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(0));              //params for TAKE_ALL
 
         //combines these params and actions into a single input for the universal router
         bytes[] memory inputs= new bytes[](1);
@@ -316,7 +317,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         uint256 ethBeforeSwap= address(this).balance;
 
         uint256 deadline = block.timestamp + DEFAULT_SWAP_DEADLINE; //how long the swap is valid for
-        universalRouter.execute(commands, inputs, deadline); //execute the swap
+        universalRouter.execute{value: 0.001 ether}(commands, inputs, deadline); //execute the swap
 
         uint256 ethBalanceAfter = address(this).balance;
 
@@ -352,6 +353,126 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         return tokenBalance[token];
     }
 
+    function getTokenAllowance(address token) external view returns(uint256) {
+        return IERC20(token).allowance(address(this), address(universalRouter));
+    }
+
+    function getSwapQuote(address token, uint256 tokenAmount, uint256 slippageBps) external returns(uint256 expectedOut, uint256 minAmountOut) {
+        
+        if(tokenAmount == 0) return (0, 0);
+        
+        PoolKey memory poolKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(token),
+            fee: 3000,          
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        
+        expectedOut = _getExpectedAmountOut(poolKey, ZERO_TO_ONE_REDEEM, tokenAmount);
+        minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
+    }
+
+    function getRedemptionPreview(uint256 dtfAmount, uint256 slippageBps) 
+    external 
+    returns(uint256 ethAmount, uint256 feeAmount, uint256 netAmount) {
+        
+        require(dtfAmount > 0, "invalid amount");
+        require(totalSupply() > 0, "no supply");
+        
+        uint256 userShareBPS = (dtfAmount * BASIC_POINTS) / totalSupply();
+        
+        // Calculate expected ETH from selling tokens
+        for(uint256 i = 0; i < tokens.length; i++) {
+            uint256 tokenAmountToSell = (tokenBalance[tokens[i]] * userShareBPS) / BASIC_POINTS;
+            
+            if(tokens[i] == address(0)) {
+                ethAmount += tokenAmountToSell;
+            } else {
+                PoolKey memory poolKey = PoolKey({
+                    currency0: Currency.wrap(address(0)),
+                    currency1: Currency.wrap(tokens[i]),
+                    fee: 3000,          
+                    tickSpacing: 60,
+                    hooks: IHooks(address(0))
+                });
+                
+                uint256 expectedEthOut = _getExpectedAmountOut(poolKey, ZERO_TO_ONE_REDEEM, tokenAmountToSell);
+                uint256 minEthOut = (expectedEthOut * (10000 - slippageBps)) / 10000;
+                ethAmount += minEthOut; // Use minimum to be conservative
+            }
+        }
+        
+        feeAmount = (ethAmount * REDEEM_FEE_BPS) / BASIC_POINTS;
+        netAmount = ethAmount - feeAmount;
+    }
+
+    function checkRedemption(address user, uint256 dtfAmount) 
+        external 
+        view 
+        returns(bool canRedeem, string memory reason) {
+        
+        if(dtfAmount == 0) {
+            return (false, "Amount cannot be zero");
+        }
+        
+        if(balanceOf(user) < dtfAmount) {
+            return (false, "Insufficient DTF balance");
+        }
+        
+        if(totalSupply() == 0) {
+            return (false, "No total supply");
+        }
+        
+        // Check if we have tokens to sell
+        uint256 userShareBPS = (dtfAmount * BASIC_POINTS) / totalSupply();
+        bool hasTokensToSell = false;
+        
+        for(uint256 i = 0; i < tokens.length; i++) {
+            uint256 tokenAmountToSell = (tokenBalance[tokens[i]] * userShareBPS) / BASIC_POINTS;
+            if(tokenAmountToSell > 0) {
+                hasTokensToSell = true;
+                
+                // For ERC20 tokens, check allowance
+                if(tokens[i] != address(0)) {
+                    uint256 allowance = IERC20(tokens[i]).allowance(address(this), address(universalRouter));
+                    if(allowance < tokenAmountToSell) {
+                        return (false, "Insufficient token allowance");
+                    }
+                }
+            }
+        }
+        
+        if(!hasTokensToSell) {
+            return (false, "No tokens to redeem");
+        }
+        
+        return (true, "");
+    }
+
+    function getDetailedPortfolio() 
+        external 
+        returns(
+            address[] memory tokenAddresses, 
+            uint256[] memory balances, 
+            uint256[] memory ethValues
+        ) {
+        
+        tokenAddresses = new address[](tokens.length);
+        balances = new uint256[](tokens.length);
+        ethValues = new uint256[](tokens.length);
+        
+        for(uint256 i = 0; i < tokens.length; i++) {
+            tokenAddresses[i] = tokens[i];
+            balances[i] = tokenBalance[tokens[i]];
+            
+            if(tokens[i] == address(0)) {
+                ethValues[i] = balances[i]; // ETH value is same as balance
+            } else {
+                ethValues[i] = _getTokenValueInETH(tokens[i], balances[i]);
+            }
+        }
+    }
 
     //OWNER FUNCTIONS
     function withdrawFees() external onlyOwner {
