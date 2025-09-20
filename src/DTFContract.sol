@@ -41,8 +41,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     mapping (address => uint256) public tokenBalance;
 
     uint256 public immutable createdAt;
-    uint256 public totalValueLocked;
-    uint256 public totalFeesCollected;
+    uint256 public pendingFees;
     
     constructor(
         string memory _name,
@@ -88,21 +87,35 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         require(balanceOf(msg.sender) >= dtfAmount, "insufficient DTF balance");
         require(dtfAmount > 0, "invalid amount");
 
-        uint256 fee= (dtfAmount * REDEEM_FEE_BPS)/BASIC_POINTS;
         uint256 userShareBPS= (dtfAmount * BASIC_POINTS) / totalSupply(); //gives what percentage of the total supply the user is redeeming 
-
         uint256 ethRedeemed= _sellUnderlyingTokensForETH(userShareBPS);
+        uint256 fee= (ethRedeemed * REDEEM_FEE_BPS)/BASIC_POINTS;
         uint256 redeemAmount= ethRedeemed - fee;
 
         _burn(msg.sender, dtfAmount);
 
-        totalValueLocked -= ethRedeemed;
-        totalFeesCollected += fee;
+        pendingFees += fee;
 
         (bool success, ) = msg.sender.call{value: redeemAmount}("");
         require(success, "ETH transfer failed");
 
         emit TokensRedeemed(msg.sender, dtfAmount, redeemAmount);
+    }
+
+    function getCurrentPortfolioValue() public returns(uint256 totalValue) {
+
+        uint256 ethValue = address(this).balance - pendingFees;
+        uint256 erc20Value;
+
+        for(uint256 i = 0; i < tokens.length; i++) {
+            address token = tokens[i];
+            // Skip ETH, as it's already accounted for in `address(this).balance`
+            if(token != address(0)) {
+                uint256 balance = tokenBalance[token];
+                erc20Value += _getTokenValueInETH(token, balance);
+            }
+        }
+        return ethValue + erc20Value;
     }
 
     //INTERNAL FUNCTIONS
@@ -117,11 +130,10 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         uint256 dtfTokensToMint= _calculateDTFTokensToMint(investedAmount);
         _mint(to, dtfTokensToMint);
 
-        //update state variables
-        totalValueLocked += investedAmount;
-        totalFeesCollected += fee;
+        //update state variable
+        pendingFees += fee;
 
-        emit DTFTokensMinted(totalValueLocked, dtfTokensToMint, to);
+        emit DTFTokensMinted(investedAmount, dtfTokensToMint, to);
     }
 
     function _buyUnderlyingTokensWithETH(uint256 amount,  uint256 slippageBps) internal{
@@ -178,17 +190,31 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         }
     }
 
+    function _getTokenValueInETH(address token, uint256 tokenAmount) internal returns(uint256 ethValue) {
+        if(tokenAmount == 0) return 0;
+        
+        PoolKey memory poolKey=PoolKey({
+            currency0: Currency.wrap(token),        //the token getting swapped
+            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
+            fee: 3000,          
+            tickSpacing: 60,                        // Tick spacing for the fee tier      
+            hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
+        });
+        
+        return _getExpectedAmountOut(poolKey, true, tokenAmount);
+    }
+
     function _swapETHForTokenV4(address token, uint256 ethAmount, uint256 slippageBps) internal returns(uint256 tokensReceived){
 
         require(ethAmount > 0, "invalid amount");      
 
         //Define PoolKey for the ETH/token pair
-        (address currency0, address currency1) = address(0) < token ? (address(0), token) : (token, address(0));
-        bool zeroForOne = (address(0) == currency0);
+        // (address currency0, address currency1) = address(0) < token ? (address(0), token) : (token, address(0));
+        bool zeroForOne = true;
 
         PoolKey memory poolKey = PoolKey({
-            currency0: Currency.wrap(currency0),    //the ETH currency getting accepted
-            currency1: Currency.wrap(currency1),         //the token currency getting swapped to
+            currency0: Currency.wrap(address(0)),    //the ETH currency getting accepted
+            currency1: Currency.wrap(token),         //the token currency getting swapped to
             fee: 3000,    
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks: IHooks(address(0))               //no hooks for this basic swap             
@@ -243,16 +269,16 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         require(tokenAmount > 0, "invalid amount");
 
         //Define PoolKey for the ETH/token pair
-        (address currency0, address currency1) = token < address(0) ? (address(0), token) : (token, address(0));
-        bool zeroForOne = (token == currency0);
 
         PoolKey memory poolKey=PoolKey({
-            currency0: Currency.wrap(currency0),        //the token getting swapped
-            currency1: Currency.wrap(currency1),   //asset being swapped to, eth in this case
+            currency0: Currency.wrap(token),        //the token getting swapped
+            currency1: Currency.wrap(address(0)),   //asset being swapped to, eth in this case
             fee: 3000,          
             tickSpacing: 60,                        // Tick spacing for the fee tier      
             hooks:  IHooks(address(0))              //no hooks for this basic swap             //the fee tier of the pool
         });
+
+        bool zeroForOne = true;
 
         //get expected amount out for slippage protection
         uint256 expectedEthOut = _getExpectedAmountOut(poolKey, zeroForOne, tokenAmount);
@@ -274,7 +300,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             poolKey: poolKey,
             zeroForOne: zeroForOne,                 //boolean determines the direction of the swap,swapping from token to eth
             amountIn: uint128(tokenAmount),           //amount of eth to swap
-            amountOutMinimum: uint128(amountOutMinimum),             //no slippage protection for now
+            amountOutMinimum: uint128(amountOutMinimum),             //slippage protection
             hookData: bytes("")                     //no hook data
         });
 
@@ -299,14 +325,17 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         require(ethReceived > 0, "No tokens received from swap");          
     }
  
-    function _calculateDTFTokensToMint(uint256 amount) internal view returns(uint256){
-        
-        if(totalSupply() == 0){
-
-            return amount;
+    function _calculateDTFTokensToMint(uint256 amount) internal returns(uint256) {
+        if(totalSupply() == 0) {
+            return amount; // First mint: 1 ETH = 1 DTF
         } else {
-
-            return (amount * totalSupply()) / totalValueLocked;
+            uint256 currentPortfolioValue = getCurrentPortfolioValue();
+            
+            // If portfolio has no value, something's wrong
+            require(currentPortfolioValue > 0, "Portfolio has no value");
+            
+            // DTF tokens to mint = (ETH invested * current total supply) / current portfolio value
+            return (amount * totalSupply()) / currentPortfolioValue;
         }
     }
 
@@ -326,10 +355,10 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
     //OWNER FUNCTIONS
     function withdrawFees() external onlyOwner {
-        require(totalFeesCollected  > 0, "No fees to withdraw");
+        require(pendingFees  > 0, "No fees to withdraw");
         
-        uint256 feesToWithdraw = totalFeesCollected ;
-        totalFeesCollected  = 0;
+        uint256 feesToWithdraw = pendingFees ;
+        pendingFees  = 0;
         
         (bool success,) = payable(owner()).call{value: feesToWithdraw}("");
         require(success, "Fee transfer failed");

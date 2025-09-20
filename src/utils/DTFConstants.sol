@@ -12,6 +12,6 @@ abstract contract DTFConstants{
     uint256 internal constant MINT_FEES_BPS= 30; //0.3% fees
     uint256 internal constant REDEEM_FEE_BPS = 30; // 0.3% fees
     uint256 internal constant DEFAULT_SWAP_DEADLINE = 60; //1 min   
-    uint128 public constant SLIPPAGE_BPS = 200; //1% slippage
+    uint128 public constant SLIPPAGE_BPS = 200; //2% slippage
 
 }
