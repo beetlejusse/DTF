@@ -16,6 +16,7 @@ import "../lib/v4-periphery/src/interfaces/IV4Quoter.sol";
 import "../lib/v4-core/src/interfaces/IPoolManager.sol";
 import "../lib/v4-core/src/types/PoolKey.sol";
 import "../lib/v4-core/src/libraries/StateLibrary.sol";
+import "../lib/permit2/src/interfaces/IPermit2.sol";
 
 import {console} from "../lib/forge-std/src/console.sol";
 
@@ -34,6 +35,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     UniversalRouter public immutable universalRouter;
     IPoolManager public immutable poolManager;
     IV4Quoter public immutable quoter;
+    IPermit2 public immutable permit2;
 
     address[] public tokens;
     uint256[] public weights;
@@ -62,6 +64,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         universalRouter = UniversalRouter(payable(_deployment.universalRouter));
         poolManager = IPoolManager(_deployment.poolManager); 
         quoter = IV4Quoter(_deployment.quoter); 
+        permit2 = IPermit2(_deployment.permit2);
 
         //approve universal router to spend tokens
         for(uint256 i; i< tokens.length; i++){
@@ -73,8 +76,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     }
 
     receive() external payable{
-        require(msg.value >0, "No ETH sent");
-        _mintWithEth(msg.value, msg.sender, SLIPPAGE_BPS); //default slippageBps of 2%
+        // require(msg.value >0, "No ETH sent");
+        // _mintWithEth(msg.value, msg.sender, SLIPPAGE_BPS); //default slippageBps of 2%
     }
 
     function mintWithEth(uint256  slippageBps) external payable nonReentrant{
@@ -165,6 +168,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             if( tokens[i]== address(0)){
                 ethRedeemed += tokenAmountToSell;
             } else {
+                approveTokenWithPermit2(tokens[i], uint160(tokenAmountToSell), uint48(block.timestamp + 3600));
                 uint256 ethRecievedFromSwap= _swapTokenForETHV4(tokens[i], tokenAmountToSell, slippageBps); 
                 ethRedeemed += ethRecievedFromSwap;
             }
@@ -246,7 +250,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         params[0]= abi.encode(swapParams);                  //params for SWAP_EXACT_IN_SINGLE
         params[1] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(ethAmount));              //params for SETTLE_ALL
-        params[2] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(0));              //params for TAKE_ALL
+        params[2] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(amountOutMinimum));              //params for TAKE_ALL
 
         //combines these params and actions into a single input for the universal router
         bytes[] memory inputs= new bytes[](1);
@@ -262,7 +266,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         tokensReceived = tokenBalanceAfter - tokenBalanceBefore;
 
-        require(tokensReceived > 0, "No tokens received from swap");        
+        require(tokensReceived >= amountOutMinimum, "Insufficient tokens received");        
     }
 
     function _swapTokenForETHV4(address token, uint256 tokenAmount, uint256 slippageBps) internal returns(uint256 ethReceived){
@@ -307,7 +311,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         params[0]= abi.encode(swapParams);                  //params for SWAP_EXACT_IN_SINGLE
         params[1] = abi.encode(Currency.unwrap(poolKey.currency1), uint128(tokenAmount));              //params for SETTLE_ALL
-        params[2] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(0));              //params for TAKE_ALL
+        params[2] = abi.encode(Currency.unwrap(poolKey.currency0), uint128(amountOutMinimum));              //params for TAKE_ALL
 
         //combines these params and actions into a single input for the universal router
         bytes[] memory inputs= new bytes[](1);
@@ -317,13 +321,13 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         uint256 ethBeforeSwap= address(this).balance;
 
         uint256 deadline = block.timestamp + DEFAULT_SWAP_DEADLINE; //how long the swap is valid for
-        universalRouter.execute{value: 0.001 ether}(commands, inputs, deadline); //execute the swap
+        universalRouter.execute(commands, inputs, deadline); //execute the swap
 
         uint256 ethBalanceAfter = address(this).balance;
 
         ethReceived = ethBalanceAfter - ethBeforeSwap;
 
-        require(ethReceived > 0, "No tokens received from swap");          
+        require(ethReceived >= amountOutMinimum, "Insufficient ETH received");          
     }
  
     function _calculateDTFTokensToMint(uint256 amount) internal returns(uint256) {
@@ -338,6 +342,15 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
             // DTF tokens to mint = (ETH invested * current total supply) / current portfolio value
             return (amount * totalSupply()) / currentPortfolioValue;
         }
+    }
+
+    function approveTokenWithPermit2(
+        address token,
+        uint160 amount,
+        uint48 expiration
+    ) internal {
+        IERC20(token).approve(address(permit2), type(uint256).max);
+        permit2.approve(token, address(universalRouter), amount, expiration);
     }
 
     //VIEWER FUNCTIONS

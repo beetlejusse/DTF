@@ -6,4 +6,5 @@ struct UniswapV4Addresses {
     address poolManager;
     address universalRouter;
     address quoter;
+    address permit2;
 }
