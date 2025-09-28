@@ -1,4 +1,4 @@
-[
+const DTFFACTORY_ABI=[
   {
     "inputs": [
       {
@@ -410,4 +410,6 @@
     "stateMutability": "view",
     "type": "function"
   }
-]
+];
+
+export default DTFFACTORY_ABI;

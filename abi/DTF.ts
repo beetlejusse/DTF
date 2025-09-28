@@ -1,4 +1,4 @@
-const DTF_ABI=[
+export const DTF_ABI=[
   {
     "inputs": [
       {
@@ -874,4 +874,6 @@ const DTF_ABI=[
     "stateMutability": "view",
     "type": "function"
   }
-]
+];
+
+export default DTF_ABI;

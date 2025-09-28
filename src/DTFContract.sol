@@ -23,7 +23,7 @@ import {console} from "../lib/forge-std/src/console.sol";
 import "./utils/DTFConstants.sol";
 import "./utils/UniswapV4Types.sol";
 
-contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
+contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable {
 
     //EVENTS
     event DTFTokensMinted(uint256 investedETH, uint256 dtfTokensMinted, address indexed to);
@@ -44,7 +44,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
     uint256 public immutable createdAt;
     uint256 public pendingFees;
-    
+    uint256 public totalEthLocked; // New state variable to track total ETH locked
+
     constructor(
         string memory _name,
         string memory _symbol,
@@ -98,6 +99,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         _burn(msg.sender, dtfAmount);
 
         pendingFees += fee;
+        totalEthLocked -= redeemAmount; // Decrease total ETH locked by the redeemed amount
 
         (bool success, ) = msg.sender.call{value: redeemAmount}("");
         require(success, "ETH transfer failed");
@@ -135,6 +137,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
 
         //update state variable
         pendingFees += fee;
+        totalEthLocked += investedAmount; // Increase total ETH locked by the invested amount
 
         emit DTFTokensMinted(investedAmount, dtfTokensToMint, to);
     }
@@ -371,7 +374,6 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
     }
 
     function getSwapQuote(address token, uint256 tokenAmount, uint256 slippageBps) external returns(uint256 expectedOut, uint256 minAmountOut) {
-        
         if(tokenAmount == 0) return (0, 0);
         
         PoolKey memory poolKey = PoolKey({
@@ -386,9 +388,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         minAmountOut = (expectedOut * (10000 - slippageBps)) / 10000;
     }
 
-    function getRedemptionPreview(uint256 dtfAmount, uint256 slippageBps) 
-    external 
-    returns(uint256 ethAmount, uint256 feeAmount, uint256 netAmount) {
+    function getRedemptionPreview(uint256 dtfAmount, uint256 slippageBps) external returns(uint256 ethAmount, uint256 feeAmount, uint256 netAmount) {
         
         require(dtfAmount > 0, "invalid amount");
         require(totalSupply() > 0, "no supply");
@@ -419,11 +419,8 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         feeAmount = (ethAmount * REDEEM_FEE_BPS) / BASIC_POINTS;
         netAmount = ethAmount - feeAmount;
     }
-
-    function checkRedemption(address user, uint256 dtfAmount) 
-        external 
-        view 
-        returns(bool canRedeem, string memory reason) {
+    
+    function checkRedemption(address user, uint256 dtfAmount) external view returns(bool canRedeem, string memory reason) {
         
         if(dtfAmount == 0) {
             return (false, "Amount cannot be zero");
@@ -463,9 +460,7 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
         return (true, "");
     }
 
-    function getDetailedPortfolio() 
-        external 
-        returns(
+    function getDetailedPortfolio() external returns(
             address[] memory tokenAddresses, 
             uint256[] memory balances, 
             uint256[] memory ethValues
@@ -485,6 +480,101 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable{
                 ethValues[i] = _getTokenValueInETH(tokens[i], balances[i]);
             }
         }
+    }
+
+    // New Viewer Functions
+    function getTotalValueLocked() external  returns (uint256 totalValue) {
+        return getCurrentPortfolioValue();
+    }
+
+    function getUserDTFBalance(address user) external view returns (uint256) {
+        return balanceOf(user);
+    }
+
+    function getUserPendingRedemptionValue(address user, uint256 dtfAmount) external returns (uint256 ethValue, uint256 fee) {
+        require(dtfAmount > 0, "invalid amount");
+        require(balanceOf(user) >= dtfAmount, "Insufficient DTF balance");
+        require(totalSupply() > 0, "No supply");
+
+        uint256 userShareBPS = (dtfAmount * BASIC_POINTS) / totalSupply();
+        
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 tokenAmountToSell = (tokenBalance[tokens[i]] * userShareBPS) / BASIC_POINTS;
+            if (tokens[i] == address(0)) {
+                ethValue += tokenAmountToSell;
+            } else {
+                PoolKey memory poolKey = PoolKey({
+                    currency0: Currency.wrap(address(0)),
+                    currency1: Currency.wrap(tokens[i]),
+                    fee: 3000,
+                    tickSpacing: 60,
+                    hooks: IHooks(address(0))
+                });
+                uint256 expectedEthOut = _getExpectedAmountOut(poolKey, ZERO_TO_ONE_REDEEM, tokenAmountToSell);
+                ethValue += expectedEthOut;
+            }
+        }
+        fee = (ethValue * REDEEM_FEE_BPS) / BASIC_POINTS;
+    }
+
+    function getTokenDetails(address token) external returns (uint256 balance, uint256 weight, uint256 ethValue) {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == token) {
+                balance = tokenBalance[token];
+                weight = weights[i];
+                if (token == address(0)) {
+                    ethValue = balance; // ETH value is same as balance
+                } else {
+                    ethValue = _getTokenValueInETH(token, balance);
+                }
+                break;
+            }
+        }
+        require(balance > 0 || token == address(0), "Token not in portfolio");
+    }
+
+    function getPortfolioComposition() external returns (address[] memory tokenAddresses, uint256[] memory balances, uint256[] memory _weights, uint256[] memory ethValues) {
+        tokenAddresses = new address[](tokens.length);
+        balances = new uint256[](tokens.length);
+        _weights = new uint256[](tokens.length);
+        ethValues = new uint256[](tokens.length);
+
+        for (uint256 i = 0; i < tokens.length; i++) {
+            tokenAddresses[i] = tokens[i];
+            balances[i] = tokenBalance[tokens[i]];
+            _weights[i] = _weights[i]; // Copy weights array
+            if (tokens[i] == address(0)) {
+                ethValues[i] = balances[i]; // ETH value is same as balance
+            } else {
+                ethValues[i] = _getTokenValueInETH(tokens[i], balances[i]);
+            }
+        }
+    }
+
+    function getContractAge() external view returns (uint256) {
+        return block.timestamp - createdAt;
+    }
+
+    function getFeeStatus() external view returns (uint256) {
+        return pendingFees;
+    }
+
+    function getMintPreview(uint256 ethAmount, uint256 slippageBps) external returns (uint256 dtfTokens, uint256 fee) {
+        require(ethAmount > 0, "Invalid ETH amount");
+        require(slippageBps <= 500, "Slippage exceeds 5% limit"); // 500 BPS = 5%
+
+        fee = (ethAmount * MINT_FEES_BPS) / BASIC_POINTS;
+        uint256 investedAmount = ethAmount - fee;
+        dtfTokens = _calculateDTFTokensToMint(investedAmount);
+    }
+
+    function getActiveStatus() external view returns (bool) {
+        // Simple check: assume active if created and has non-zero total supply
+        return createdAt > 0 && totalSupply() > 0;
+    }
+
+    function getTotalEthLocked() external view returns (uint256) {
+        return totalEthLocked;
     }
 
     //OWNER FUNCTIONS
