@@ -419,7 +419,11 @@ contract DTFContract is DTFConstants, ReentrancyGuard, ERC20, Ownable {
         feeAmount = (ethAmount * REDEEM_FEE_BPS) / BASIC_POINTS;
         netAmount = ethAmount - feeAmount;
     }
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> 169fa2c3f9fa5d5bfbfbdaea5c1c24cbd38ac605
     function checkRedemption(address user, uint256 dtfAmount) external view returns(bool canRedeem, string memory reason) {
         
         if(dtfAmount == 0) {
